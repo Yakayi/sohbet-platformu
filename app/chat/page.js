@@ -4,6 +4,9 @@ import { useRouter } from 'next/navigation'
 import { io } from 'socket.io-client'
 import { Peer } from 'peerjs';
 
+let peer = null;
+let currentCall = null;
+
 // NOT: Canlıya aldığımızda buradaki URL'i Google Cloud adresimizle değiştireceğiz!
 const socket = io('https://proje-sesli-sohbet.onrender.com');
 
@@ -129,35 +132,51 @@ export default function ChatDashboard() {
     }
 
     const joinVoice = async () => {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            localStream.current = stream;
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        localStream.current = stream;
+        setIsInVoice(true);
 
-            // PeerJS başlat
-            const peer = new Peer();
+        // 1. PeerJS Başlat
+        peer = new Peer();
 
-            peer.on('open', (id) => {
-                // Kendi ID'ni ve kullanıcı adını sunucuya yolla
-                socket.emit('join_voice', {
-                    room: 'genel-ses',
-                    peerId: id,
-                    username: localStorage.getItem("username") // Veya senin kullanıcı adı değişkenin
-                });
+        peer.on('open', (id) => {
+            // Sunucuya 'peerId'ni yolla, o da diğerlerine haber versin
+            socket.emit('join_voice', { 
+                room: 'genel-ses', 
+                peerId: id,
+                username: localStorage.getItem("username") || "Misafir"
             });
+        });
 
-            // Diğerlerinden gelen sesleri dinle
-            peer.on('call', (call) => {
-                call.answer(stream);
+        // 2. Birisi seni ararsa (gelen çağrıyı cevapla)
+        peer.on('call', (call) => {
+            call.answer(stream);
+            call.on('stream', (remoteStream) => {
+                const audio = new Audio();
+                audio.srcObject = remoteStream;
+                audio.play();
+            });
+            currentCall = call;
+        });
+
+        // 3. Sunucudan "yeni biri geldi" sinyali gelirse onu ara
+        socket.on('user-connected', (data) => {
+            if (data.peerId) {
+                const call = peer.call(data.peerId, stream);
                 call.on('stream', (remoteStream) => {
-                    // Burada gelen sesi bir <audio> etiketine ver
+                    const audio = new Audio();
+                    audio.srcObject = remoteStream;
+                    audio.play();
                 });
-            });
+            }
+        });
 
-            setIsInVoice(true);
-        } catch (err) {
-            alert("Mikrofon hatası!");
-        }
+    } catch (err) {
+        console.error(err);
+        alert("Mikrofon izni alınamadı!");
     }
+};
 
     const leaveVoice = () => {
         // 1. Mikrofon akışını tamamen durdur (kırmızı ışık sönsün)
