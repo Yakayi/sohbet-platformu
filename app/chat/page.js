@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation'
 import { io } from 'socket.io-client'
 
 // NOT: Canlıya aldığımızda buradaki URL'i Google Cloud adresimizle değiştireceğiz!
-const socket = io('[https://proje-sesli-sohbet.onrender.com](https://proje-sesli-sohbet.onrender.com)');
+const socket = io('https://proje-sesli-sohbet.onrender.com');
 
 const ICE_SERVERS = {
     iceServers: [
