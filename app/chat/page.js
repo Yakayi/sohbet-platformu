@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { io } from 'socket.io-client'
+import { Peer } from 'peerjs';
 
 // NOT: Canlıya aldığımızda buradaki URL'i Google Cloud adresimizle değiştireceğiz!
 const socket = io('https://proje-sesli-sohbet.onrender.com');
@@ -129,30 +130,51 @@ export default function ChatDashboard() {
 
     const joinVoice = async () => {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-            localStream.current = stream
-            setIsInVoice(true)
-            socket.emit('join_voice', 'genel-ses')
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            localStream.current = stream;
+
+            // PeerJS başlat
+            const peer = new Peer();
+
+            peer.on('open', (id) => {
+                // Kendi ID'ni ve kullanıcı adını sunucuya yolla
+                socket.emit('join_voice', {
+                    room: 'genel-ses',
+                    peerId: id,
+                    username: localStorage.getItem("username") // Veya senin kullanıcı adı değişkenin
+                });
+            });
+
+            // Diğerlerinden gelen sesleri dinle
+            peer.on('call', (call) => {
+                call.answer(stream);
+                call.on('stream', (remoteStream) => {
+                    // Burada gelen sesi bir <audio> etiketine ver
+                });
+            });
+
+            setIsInVoice(true);
         } catch (err) {
-            alert("Mikrofon izni alınamadı! Lütfen tarayıcı ayarlarından izin verin.")
+            alert("Mikrofon hatası!");
         }
     }
 
     const leaveVoice = () => {
-        Object.values(peers.current).forEach(pc => pc.close())
-        peers.current = {}
-
+        // 1. Mikrofon akışını tamamen durdur (kırmızı ışık sönsün)
         if (localStream.current) {
-            localStream.current.getTracks().forEach(track => track.stop())
-            localStream.current = null
+            localStream.current.getTracks().forEach(track => track.stop());
         }
 
-        setIsInVoice(false)
-        setVoiceUsers([])
-        socket.disconnect()
-        setTimeout(() => socket.connect(), 500)
-    }
+        // 2. Socket üzerinden "çıktım" sinyali gönder
+        socket.emit('leave_voice', { room: 'genel-ses' });
 
+        // 3. Peer bağlantısını kopar
+        if (peerInstance.current) {
+            peerInstance.current.destroy();
+        }
+
+        setIsInVoice(false);
+    };
     const sendMessage = (e) => {
         e.preventDefault()
         if (currentMessage.trim() === '') return
@@ -307,12 +329,15 @@ export default function ChatDashboard() {
                                             <span className="px-3 py-1 bg-emerald-500/10 text-emerald-400 text-xs font-bold rounded-full">SEN</span>
                                         </div>
 
-                                        {voiceUsers.map((id, index) => (
-                                            <div key={index} className="flex items-center space-x-3 bg-slate-900 border border-slate-800 p-3 rounded-2xl mb-2 animate-pulse">
-                                                <div className="w-10 h-10 rounded-xl bg-slate-800 text-slate-500 flex items-center justify-center font-bold">
+                                        // Eğer voiceUsers sadece ID listesiyse, kullanıcı adını başka bir yerden (örneğin bir objeden) çekmen lazım.
+                                        // Şimdilik test etmek için şöyle yapalım:
+                                        {voiceUsers.map((user, index) => (
+                                            <div key={index} className="flex items-center space-x-3 bg-slate-900 border border-slate-800 p-3">
+                                                <div className="w-10 h-10 rounded-xl bg-slate-800 text-slate-500 flex items-center justify-center">
                                                     🎧
                                                 </div>
-                                                <span className="text-white font-medium">Bağlı Cihaz {index + 1}</span>
+                                                {/* Burada user objesinin içinde bir 'username' alanı olduğunu varsayıyorum */}
+                                                <span className="text-white font-medium">{user.username || "Misafir"}</span>
                                             </div>
                                         ))}
                                     </div>
