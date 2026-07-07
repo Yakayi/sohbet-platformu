@@ -62,8 +62,19 @@ export default function ChatDashboard() {
 
         // 4. SESLİ ODAYA YENİ BİRİ GİRDİĞİNDE ONU ARA
         socket.on('user-connected', (data) => {
+            // Ekrana yansıtmak için listeye ekliyoruz
+            setVoiceUsers((prev) => {
+                if (!prev.some(u => u.peerId === data.peerId)) {
+                    return [...prev, data];
+                }
+                return prev;
+            });
+
             if (peerInstance.current && localStream.current && data.peerId) {
-                const call = peerInstance.current.call(data.peerId, localStream.current);
+                // Sesi ararken kendi ismimizi de metadata olarak karşıya yolluyoruz
+                const call = peerInstance.current.call(data.peerId, localStream.current, {
+                    metadata: { username: JSON.parse(localStorage.getItem('aktif_kullanici'))?.kullanici_adi }
+                });
                 call.on('stream', (remoteStream) => {
                     playRemoteStream(remoteStream, data.peerId);
                 });
@@ -72,6 +83,10 @@ export default function ChatDashboard() {
 
         // 5. BİRİ ÇIKTIĞINDA SESİNİ KALDIR
         socket.on('user-disconnected', (peerId) => {
+            // Çıkan kişiyi ekrandaki listeden sil
+            setVoiceUsers((prev) => prev.filter(u => u.peerId !== peerId));
+
+            // Sesini de sil
             const audioEl = document.getElementById(`audio-${peerId}`);
             if (audioEl) audioEl.remove();
         });
