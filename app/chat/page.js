@@ -153,6 +153,14 @@ export default function ChatDashboard() {
         if (el) el.remove();
     };
 
+    // --- YENİ: KULLANICININ BİREYSEL SESİNİ KISIP AÇMA FONKSİYONU ---
+    const changeUserVolume = (peerId, volumeValue) => {
+        const audioEl = document.getElementById(`audio-${peerId}`);
+        if (audioEl) {
+            audioEl.volume = volumeValue; // 0.0 (Sessiz) ile 1.0 (En yüksek) arası
+        }
+    };
+
     const toggleMic = () => {
         if (localStream.current) {
             const audioTrack = localStream.current.getAudioTracks()[0];
@@ -289,7 +297,7 @@ export default function ChatDashboard() {
     return (
         <div className={`flex flex-col h-[100dvh] transition-colors duration-300 ${themeBg}`}>
 
-            {/* MOBİL İÇİN ÜST HEADER (Sadece telefonda görünür) */}
+            {/* MOBİL İÇİN ÜST HEADER */}
             <div className={`md:hidden flex items-center justify-between p-4 border-b z-20 ${cardBg}`}>
                 <div className="flex items-center space-x-3">
                     <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center font-bold text-white shadow-md">
@@ -307,10 +315,10 @@ export default function ChatDashboard() {
                 </div>
             </div>
 
-            {/* ANA TAŞIYICI (Masaüstünde yan yana, Mobilde tek sütun) */}
+            {/* ANA TAŞIYICI */}
             <div className="flex flex-1 overflow-hidden">
 
-                {/* MASAÜSTÜ SOL MENÜ (Telefonda gizli) */}
+                {/* MASAÜSTÜ SOL MENÜ */}
                 <div className={`hidden md:flex flex-col w-72 border-r z-20 ${cardBg}`}>
                     <div className="p-6 border-b flex items-center justify-between transition-colors duration-300" style={{ borderColor: isDarkMode ? '#1e293b' : '#e2e8f0' }}>
                         <div className="flex items-center space-x-3">
@@ -343,7 +351,7 @@ export default function ChatDashboard() {
                     </div>
                 </div>
 
-                {/* SAĞ İÇERİK ALANI (Sohbet veya Ses) */}
+                {/* SAĞ İÇERİK ALANI */}
                 <div className="flex-1 flex flex-col relative overflow-hidden">
                     {activeTab === 'chat' ? (
                         <>
@@ -392,6 +400,7 @@ export default function ChatDashboard() {
                     ) : (
                         <div className="flex-1 flex flex-col p-4 md:p-8 relative overflow-y-auto mb-[70px] md:mb-0">
 
+                            {/* EKRAN PAYLAŞIMI ALANI */}
                             <div id="video-grid" className="w-full flex flex-wrap justify-center gap-4 mb-6 empty:hidden z-10"></div>
 
                             <div className="z-10 w-full max-w-2xl mx-auto flex flex-col items-center mt-auto mb-auto">
@@ -427,12 +436,29 @@ export default function ChatDashboard() {
                                                 </div>
                                             </div>
 
+                                            {/* YENİ: KULLANICILAR VE SES ÇUBUKLARI */}
                                             {voiceUsers.map((user, index) => (
-                                                <div key={index} className={`flex items-center space-x-3 border p-3 rounded-2xl mt-2 ${isDarkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
-                                                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isDarkMode ? 'bg-slate-800 text-slate-500' : 'bg-slate-200 text-slate-500'}`}>
-                                                        {user.username ? user.username.charAt(0).toUpperCase() : "🎧"}
+                                                <div key={index} className={`flex items-center justify-between border p-3 rounded-2xl mt-2 ${isDarkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                                                    <div className="flex items-center space-x-3 truncate">
+                                                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isDarkMode ? 'bg-slate-800 text-slate-500' : 'bg-slate-200 text-slate-500'}`}>
+                                                            {user.username ? user.username.charAt(0).toUpperCase() : "🎧"}
+                                                        </div>
+                                                        <span className="font-medium truncate">{user.username || "Misafir"}</span>
                                                     </div>
-                                                    <span className="font-medium truncate">{user.username || "Misafir"}</span>
+
+                                                    {/* Ses Ayar Çubuğu (Slider) */}
+                                                    <div className="flex items-center space-x-2 flex-shrink-0">
+                                                        <span className="text-xs">🔊</span>
+                                                        <input
+                                                            type="range"
+                                                            min="0"
+                                                            max="1"
+                                                            step="0.05"
+                                                            defaultValue="1"
+                                                            onChange={(e) => changeUserVolume(user.peerId, e.target.value)}
+                                                            className="w-16 md:w-20 accent-indigo-500 cursor-pointer"
+                                                        />
+                                                    </div>
                                                 </div>
                                             ))}
                                         </div>
@@ -462,7 +488,7 @@ export default function ChatDashboard() {
                 </div>
             </div>
 
-            {/* MOBİL İÇİN ALT MENÜ (Bottom Nav - Bilgisayarda gizli) */}
+            {/* MOBİL İÇİN ALT MENÜ */}
             <div className={`md:hidden fixed bottom-0 w-full flex justify-around items-center p-2 border-t pb-6 z-30 ${cardBg}`}>
                 <button onClick={() => setActiveTab('chat')} className={`flex flex-col items-center p-2 rounded-xl w-20 transition-all ${activeTab === 'chat' ? 'text-indigo-500' : textMuted}`}>
                     <span className="text-2xl mb-1">💬</span>
