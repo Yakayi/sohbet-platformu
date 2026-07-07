@@ -5,17 +5,9 @@ import { io } from 'socket.io-client'
 import { Peer } from 'peerjs';
 
 let peer = null;
-let currentCall = null;
 
 // NOT: Canlıya aldığımızda buradaki URL'i Google Cloud adresimizle değiştireceğiz!
 const socket = io('https://proje-sesli-sohbet.onrender.com');
-
-const ICE_SERVERS = {
-    iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-    ]
-}
 
 export default function ChatDashboard() {
     const [profile, setProfile] = useState(null)
@@ -28,62 +20,67 @@ export default function ChatDashboard() {
     const [isInVoice, setIsInVoice] = useState(false)
     const [voiceUsers, setVoiceUsers] = useState([])
 
+    const [isMicMuted, setIsMicMuted] = useState(false);
+    const [isDeafened, setIsDeafened] = useState(false);
+
     const router = useRouter()
     const localStream = useRef(null)
-    const peers = useRef({})
-    const audioRefs = useRef({})
+    const peerInstance = useRef(null)
 
+    // --- SİSTEM BAŞLANGICI VE SOHBET GEÇMİŞİ KONTROLÜ ---
     useEffect(() => {
         checkUser()
 
+        // 1. CHAT GEÇMİŞİNİ YÜKLE VE 24 SAATLİK (1 GÜN) FİLTRE UYGULA
+        const savedChat = localStorage.getItem('chat_history');
+        if (savedChat) {
+            const parsedChat = JSON.parse(savedChat);
+            const oneDayInMs = 24 * 60 * 60 * 1000;
+            const now = Date.now();
+
+            // Sadece son 24 saat içinde atılan mesajları tut
+            const validMessages = parsedChat.filter(msg => (now - msg.timestamp) < oneDayInMs);
+            setChatMessages(validMessages);
+
+            // Temizlenmiş halini tekrar kaydet
+            localStorage.setItem('chat_history', JSON.stringify(validMessages));
+        }
+
+        // 2. YAZILI MESAJ DİNLEYİCİSİ
         socket.on('receive_message', (data) => {
-            setChatMessages((prev) => [...prev, data])
-        })
+            setChatMessages((prev) => {
+                const updated = [...prev, data];
+                localStorage.setItem('chat_history', JSON.stringify(updated));
+                return updated;
+            });
+        });
 
-        socket.on('user_joined_voice', async (newUserId) => {
-            const pc = createPeerConnection(newUserId)
-            const offer = await pc.createOffer()
-            await pc.setLocalDescription(offer)
-            socket.emit('offer', { target: newUserId, caller: socket.id, sdp: offer })
-        })
+        // 3. SESLİ ODADAKİLERİ LİSTELEME
+        socket.on('room-users', (users) => {
+            setVoiceUsers(users);
+        });
 
-        socket.on('offer', async (payload) => {
-            const pc = createPeerConnection(payload.caller)
-            await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp))
-            const answer = await pc.createAnswer()
-            await pc.setLocalDescription(answer)
-            socket.emit('answer', { target: payload.caller, caller: socket.id, sdp: answer })
-        })
-
-        socket.on('answer', async (payload) => {
-            const pc = peers.current[payload.caller]
-            if (pc) {
-                await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp))
+        // 4. SESLİ ODAYA YENİ BİRİ GİRDİĞİNDE ONU ARA
+        socket.on('user-connected', (data) => {
+            if (peerInstance.current && localStream.current && data.peerId) {
+                const call = peerInstance.current.call(data.peerId, localStream.current);
+                call.on('stream', (remoteStream) => {
+                    playRemoteStream(remoteStream, data.peerId);
+                });
             }
-        })
+        });
 
-        socket.on('ice-candidate', (incoming) => {
-            const pc = peers.current[incoming.caller]
-            if (pc) {
-                pc.addIceCandidate(new RTCIceCandidate(incoming.candidate)).catch(e => console.log(e))
-            }
-        })
-
-        socket.on('user_left_voice', (userId) => {
-            if (peers.current[userId]) {
-                peers.current[userId].close()
-                delete peers.current[userId]
-            }
-            setVoiceUsers((prev) => prev.filter((id) => id !== userId))
-        })
+        // 5. BİRİ ÇIKTIĞINDA SESİNİ KALDIR
+        socket.on('user-disconnected', (peerId) => {
+            const audioEl = document.getElementById(`audio-${peerId}`);
+            if (audioEl) audioEl.remove();
+        });
 
         return () => {
-            socket.off('receive_message')
-            socket.off('user_joined_voice')
-            socket.off('offer')
-            socket.off('answer')
-            socket.off('ice-candidate')
-            socket.off('user_left_voice')
+            socket.off('receive_message');
+            socket.off('room-users');
+            socket.off('user-connected');
+            socket.off('user-disconnected');
         }
     }, [])
 
@@ -97,103 +94,88 @@ export default function ChatDashboard() {
         setLoading(false)
     }
 
-    const createPeerConnection = (targetUserId) => {
-        const pc = new RTCPeerConnection(ICE_SERVERS)
-        peers.current[targetUserId] = pc
+    // --- GELEN SESİ OYNATMA YARDIMCISI ---
+    const playRemoteStream = (remoteStream, peerId) => {
+        if (!document.getElementById(`audio-${peerId}`)) {
+            const audio = new Audio();
+            audio.id = `audio-${peerId}`;
+            audio.srcObject = remoteStream;
+            audio.autoplay = true;
+            audio.muted = isDeafened; // Eğer kulaklık kapalıysa yeni geleni de sustur
+            document.body.appendChild(audio);
+        }
+    };
 
+    // --- SES KONTROLLERİ ---
+    const toggleMic = () => {
         if (localStream.current) {
-            localStream.current.getTracks().forEach((track) => {
-                pc.addTrack(track, localStream.current)
-            })
+            const audioTrack = localStream.current.getAudioTracks()[0];
+            audioTrack.enabled = !audioTrack.enabled;
+            setIsMicMuted(!audioTrack.enabled);
         }
+    };
 
-        pc.onicecandidate = (event) => {
-            if (event.candidate) {
-                socket.emit('ice-candidate', { target: targetUserId, caller: socket.id, candidate: event.candidate })
-            }
-        }
+    const toggleDeafen = () => {
+        const newState = !isDeafened;
+        setIsDeafened(newState);
+        const audioElements = document.querySelectorAll('audio');
+        audioElements.forEach(audio => {
+            audio.muted = newState;
+        });
+    };
 
-        pc.ontrack = (event) => {
-            setVoiceUsers((prev) => {
-                if (!prev.includes(targetUserId)) return [...prev, targetUserId]
-                return prev
-            })
-
-            let audio = audioRefs.current[targetUserId]
-            if (!audio) {
-                audio = new Audio()
-                audio.autoplay = true
-                audioRefs.current[targetUserId] = audio
-            }
-            audio.srcObject = event.streams[0]
-        }
-
-        return pc
-    }
-
+    // --- SESE KATILMA ---
     const joinVoice = async () => {
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        localStream.current = stream;
-        setIsInVoice(true);
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            localStream.current = stream;
+            setIsInVoice(true);
+            setIsMicMuted(false);
+            setIsDeafened(false);
 
-        // 1. PeerJS Başlat
-        peer = new Peer();
+            peer = new Peer();
+            peerInstance.current = peer;
 
-        peer.on('open', (id) => {
-            // Sunucuya 'peerId'ni yolla, o da diğerlerine haber versin
-            socket.emit('join_voice', { 
-                room: 'genel-ses', 
-                peerId: id,
-                username: localStorage.getItem("username") || "Misafir"
-            });
-        });
-
-        // 2. Birisi seni ararsa (gelen çağrıyı cevapla)
-        peer.on('call', (call) => {
-            call.answer(stream);
-            call.on('stream', (remoteStream) => {
-                const audio = new Audio();
-                audio.srcObject = remoteStream;
-                audio.play();
-            });
-            currentCall = call;
-        });
-
-        // 3. Sunucudan "yeni biri geldi" sinyali gelirse onu ara
-        socket.on('user-connected', (data) => {
-            if (data.peerId) {
-                const call = peer.call(data.peerId, stream);
-                call.on('stream', (remoteStream) => {
-                    const audio = new Audio();
-                    audio.srcObject = remoteStream;
-                    audio.play();
+            peer.on('open', (id) => {
+                socket.emit('join_voice', {
+                    room: 'genel-ses',
+                    peerId: id,
+                    username: profile?.kullanici_adi || "Misafir"
                 });
-            }
-        });
+            });
 
-    } catch (err) {
-        console.error(err);
-        alert("Mikrofon izni alınamadı!");
-    }
-};
+            peer.on('call', (call) => {
+                call.answer(stream);
+                call.on('stream', (remoteStream) => {
+                    playRemoteStream(remoteStream, call.peer);
+                });
+            });
 
+        } catch (err) {
+            console.error(err);
+            alert("Mikrofon izni alınamadı!");
+        }
+    };
+
+    // --- SESTEN ÇIKMA ---
     const leaveVoice = () => {
-        // 1. Mikrofon akışını tamamen durdur (kırmızı ışık sönsün)
         if (localStream.current) {
             localStream.current.getTracks().forEach(track => track.stop());
         }
-
-        // 2. Socket üzerinden "çıktım" sinyali gönder
-        socket.emit('leave_voice', { room: 'genel-ses' });
-
-        // 3. Peer bağlantısını kopar
         if (peerInstance.current) {
             peerInstance.current.destroy();
         }
 
+        socket.emit('leave_voice', { room: 'genel-ses' });
+
+        // Sayfadaki tüm sesleri temizle
+        document.querySelectorAll('audio').forEach(audio => audio.remove());
+
         setIsInVoice(false);
+        setVoiceUsers([]);
     };
+
+    // --- YAZILI MESAJ GÖNDERME ---
     const sendMessage = (e) => {
         e.preventDefault()
         if (currentMessage.trim() === '') return
@@ -201,11 +183,18 @@ export default function ChatDashboard() {
         const messageData = {
             sender: profile.kullanici_adi,
             text: currentMessage,
-            time: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
+            time: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+            timestamp: Date.now() // 1 günlük silinme kontrolü için zaman damgası eklendi
         }
 
         socket.emit('send_message', messageData)
-        setChatMessages((prev) => [...prev, messageData])
+
+        setChatMessages((prev) => {
+            const updated = [...prev, messageData];
+            localStorage.setItem('chat_history', JSON.stringify(updated));
+            return updated;
+        });
+
         setCurrentMessage('')
     }
 
@@ -275,7 +264,7 @@ export default function ChatDashboard() {
                             <h3 className="font-bold text-white text-lg tracking-wide">Yazılı Sohbet</h3>
                         </div>
 
-                        {/* Mesaj Baloncukları (iMessage/WhatsApp Tarzı) */}
+                        {/* Mesaj Baloncukları */}
                         <div className="flex-1 overflow-y-auto p-6 pt-24 space-y-4">
                             {chatMessages.length === 0 ? (
                                 <div className="h-full flex flex-col items-center justify-center opacity-50">
@@ -314,10 +303,9 @@ export default function ChatDashboard() {
                     </>
                 ) : (
                     <div className="flex-1 flex flex-col items-center justify-center p-8 text-center relative overflow-hidden">
-                        {/* Arka plan dekoratif daireler */}
                         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-indigo-500/5 rounded-full blur-3xl pointer-events-none"></div>
 
-                        <div className="z-10">
+                        <div className="z-10 w-full max-w-2xl">
                             <div className="w-24 h-24 bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700 rounded-3xl flex items-center justify-center mb-8 shadow-2xl mx-auto rotate-3">
                                 <span className="text-4xl">🎙️</span>
                             </div>
@@ -332,12 +320,12 @@ export default function ChatDashboard() {
                                 </button>
                             ) : (
                                 <div className="flex flex-col items-center w-full">
-
-                                    <div className="bg-slate-950/50 border border-slate-800 p-6 rounded-3xl w-full max-w-md shadow-2xl backdrop-blur-sm mb-8">
+                                    <div className="bg-slate-950/50 border border-slate-800 p-6 rounded-3xl w-full max-w-md shadow-2xl backdrop-blur-sm mb-6">
                                         <h3 className="text-slate-400 font-semibold mb-4 text-sm uppercase tracking-widest text-left">
                                             Odada Bulunanlar ({voiceUsers.length + 1})
                                         </h3>
 
+                                        {/* Kendi Profilimiz */}
                                         <div className="flex items-center justify-between bg-slate-900 border border-slate-800 p-3 rounded-2xl mb-3">
                                             <div className="flex items-center space-x-3">
                                                 <div className="w-10 h-10 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center font-bold">
@@ -345,25 +333,46 @@ export default function ChatDashboard() {
                                                 </div>
                                                 <span className="text-white font-medium">{profile?.kullanici_adi}</span>
                                             </div>
-                                            <span className="px-3 py-1 bg-emerald-500/10 text-emerald-400 text-xs font-bold rounded-full">SEN</span>
+                                            <div className="flex space-x-2">
+                                                {isMicMuted && <span className="px-2 py-1 bg-red-500/20 text-red-400 text-xs font-bold rounded-md">Susturuldu</span>}
+                                                <span className="px-3 py-1 bg-emerald-500/10 text-emerald-400 text-xs font-bold rounded-full">SEN</span>
+                                            </div>
                                         </div>
 
-                                        // Eğer voiceUsers sadece ID listesiyse, kullanıcı adını başka bir yerden (örneğin bir objeden) çekmen lazım.
-                                        // Şimdilik test etmek için şöyle yapalım:
+                                        {/* Diğer Kullanıcılar */}
                                         {voiceUsers.map((user, index) => (
-                                            <div key={index} className="flex items-center space-x-3 bg-slate-900 border border-slate-800 p-3">
+                                            <div key={index} className="flex items-center space-x-3 bg-slate-900 border border-slate-800 p-3 rounded-2xl mt-2">
                                                 <div className="w-10 h-10 rounded-xl bg-slate-800 text-slate-500 flex items-center justify-center">
-                                                    🎧
+                                                    {user.username ? user.username.charAt(0).toUpperCase() : "🎧"}
                                                 </div>
-                                                {/* Burada user objesinin içinde bir 'username' alanı olduğunu varsayıyorum */}
                                                 <span className="text-white font-medium">{user.username || "Misafir"}</span>
                                             </div>
                                         ))}
                                     </div>
 
-                                    <button onClick={leaveVoice} className="px-10 py-4 bg-slate-800 hover:bg-red-500 text-slate-300 hover:text-white font-bold rounded-2xl shadow-lg transition-all border border-slate-700 hover:border-red-500">
-                                        Bağlantıyı Kes
-                                    </button>
+                                    {/* KONTROL PANELİ BUTONLARI EKLENDİ */}
+                                    <div className="flex flex-wrap justify-center gap-4 mt-2">
+                                        <button
+                                            onClick={toggleMic}
+                                            className={`px-6 py-3 rounded-2xl font-bold flex items-center transition-all ${isMicMuted ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}`}
+                                        >
+                                            {isMicMuted ? "🎙️ Mikrofon Kapalı" : "🎙️ Mikrofon Açık"}
+                                        </button>
+
+                                        <button
+                                            onClick={toggleDeafen}
+                                            className={`px-6 py-3 rounded-2xl font-bold flex items-center transition-all ${isDeafened ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}`}
+                                        >
+                                            {isDeafened ? "🎧 Sesler Kapalı" : "🎧 Sesler Açık"}
+                                        </button>
+
+                                        <button
+                                            onClick={leaveVoice}
+                                            className="px-6 py-3 bg-red-600/20 hover:bg-red-600 text-red-500 hover:text-white font-bold rounded-2xl border border-red-500/30 hover:border-red-600 transition-all ml-4"
+                                        >
+                                            Odadan Çık
+                                        </button>
+                                    </div>
                                 </div>
                             )}
                         </div>
