@@ -17,6 +17,10 @@ export default function ChatDashboard() {
     const [currentMessage, setCurrentMessage] = useState('')
     const [activeTab, setActiveTab] = useState('chat')
 
+    // --- YENİ: DM VE AKTİF KULLANICI STATE'LERİ ---
+    const [activeUsers, setActiveUsers] = useState([]);
+    const [currentChat, setCurrentChat] = useState('global'); // 'global' veya 'hedef_kullanici_adi'
+
     const [isInVoice, setIsInVoice] = useState(false)
     const [voiceUsers, setVoiceUsers] = useState([])
 
@@ -24,7 +28,7 @@ export default function ChatDashboard() {
     const [isDeafened, setIsDeafened] = useState(false);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
 
-    // TEMA STATE'İ (Varsayılan Dark Mode)
+    // TEMA STATE'İ
     const [isDarkMode, setIsDarkMode] = useState(true);
 
     const router = useRouter()
@@ -42,45 +46,51 @@ export default function ChatDashboard() {
 
     // --- SİSTEM BAŞLANGICI ---
     useEffect(() => {
-        checkUser()
-
-        const savedChat = localStorage.getItem('chat_history');
-        if (savedChat) {
-            const parsedChat = JSON.parse(savedChat);
-            const oneDayInMs = 24 * 60 * 60 * 1000;
-            const now = Date.now();
-            const validMessages = parsedChat.filter(msg => (now - msg.timestamp) < oneDayInMs);
-            setChatMessages(validMessages);
-            localStorage.setItem('chat_history', JSON.stringify(validMessages));
+        const userStr = localStorage.getItem('aktif_kullanici')
+        if (!userStr) {
+            router.push('/')
+            return
         }
+        const prof = JSON.parse(userStr);
+        setProfile(prof)
+        setLoading(false)
 
+        // 1. Backend'e "Ben geldim" deyip DM listesi için kendimizi kaydediyoruz
+        socket.emit('user_connected', prof.kullanici_adi);
+
+        // 2. Aktif Kullanıcıları Dinle
+        socket.on('active_users', (users) => {
+            // Kendimizi listeden çıkarıyoruz ki kendimize mesaj atamayalım
+            setActiveUsers(users.filter(u => u.username !== prof.kullanici_adi));
+        });
+
+        // 3. Genel Mesajları Dinle
         socket.on('receive_message', (data) => {
-            setChatMessages((prev) => {
-                const updated = [...prev, data];
-                localStorage.setItem('chat_history', JSON.stringify(updated));
-                return updated;
-            });
+            setChatMessages((prev) => [...prev, { ...data, type: 'global' }]);
         });
 
-        socket.on('room-users', (users) => {
-            setVoiceUsers(users);
+        // 4. Özel Mesajları (DM) Dinle
+        socket.on('receive_dm', (data) => {
+            setChatMessages((prev) => [...prev, { ...data, type: 'dm', dmPartner: data.sender }]);
         });
+
+        // SESLİ SOHBET DİNLEYİCİLERİ
+        socket.on('room-users', (users) => setVoiceUsers(users));
 
         socket.on('user-connected', (data) => {
             setVoiceUsers((prev) => {
                 if (!prev.some(u => u.peerId === data.peerId)) return [...prev, data];
                 return prev;
             });
-
             if (peerInstance.current && localStream.current && data.peerId) {
                 const audioCall = peerInstance.current.call(data.peerId, localStream.current, {
-                    metadata: { type: 'audio', username: JSON.parse(localStorage.getItem('aktif_kullanici'))?.kullanici_adi }
+                    metadata: { type: 'audio', username: prof.kullanici_adi }
                 });
                 audioCall.on('stream', (remoteStream) => playRemoteStream(remoteStream, data.peerId));
 
                 if (screenStream.current) {
                     const screenCall = peerInstance.current.call(data.peerId, screenStream.current, {
-                        metadata: { type: 'screen', username: JSON.parse(localStorage.getItem('aktif_kullanici'))?.kullanici_adi }
+                        metadata: { type: 'screen', username: prof.kullanici_adi }
                     });
                     screenCalls.current[data.peerId] = screenCall;
                 }
@@ -95,22 +105,14 @@ export default function ChatDashboard() {
         });
 
         return () => {
+            socket.off('active_users');
             socket.off('receive_message');
+            socket.off('receive_dm');
             socket.off('room-users');
             socket.off('user-connected');
             socket.off('user-disconnected');
         }
-    }, [])
-
-    const checkUser = () => {
-        const userStr = localStorage.getItem('aktif_kullanici')
-        if (!userStr) {
-            router.push('/')
-            return
-        }
-        setProfile(JSON.parse(userStr))
-        setLoading(false)
-    }
+    }, [router])
 
     const playRemoteStream = (remoteStream, peerId) => {
         if (!document.getElementById(`audio-${peerId}`)) {
@@ -126,7 +128,6 @@ export default function ChatDashboard() {
     const playRemoteVideo = (stream, peerId, username) => {
         const grid = document.getElementById('video-grid');
         if (!grid) return;
-
         removeRemoteVideo(peerId);
 
         const container = document.createElement('div');
@@ -153,12 +154,9 @@ export default function ChatDashboard() {
         if (el) el.remove();
     };
 
-    // --- YENİ: KULLANICININ BİREYSEL SESİNİ KISIP AÇMA FONKSİYONU ---
     const changeUserVolume = (peerId, volumeValue) => {
         const audioEl = document.getElementById(`audio-${peerId}`);
-        if (audioEl) {
-            audioEl.volume = volumeValue; // 0.0 (Sessiz) ile 1.0 (En yüksek) arası
-        }
+        if (audioEl) audioEl.volume = volumeValue;
     };
 
     const toggleMic = () => {
@@ -266,6 +264,7 @@ export default function ChatDashboard() {
         setVoiceUsers([]);
     };
 
+    // --- YENİ: MESAJ GÖNDERME (Genel ve DM Ayrımı) ---
     const sendMessage = (e) => {
         e.preventDefault()
         if (currentMessage.trim() === '') return
@@ -273,17 +272,20 @@ export default function ChatDashboard() {
         const messageData = {
             sender: profile.kullanici_adi,
             text: currentMessage,
-            time: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
-            timestamp: Date.now()
+            time: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
         }
 
-        socket.emit('send_message', messageData)
-        setChatMessages((prev) => {
-            const updated = [...prev, messageData];
-            localStorage.setItem('chat_history', JSON.stringify(updated));
-            return updated;
-        });
-        setCurrentMessage('')
+        if (currentChat === 'global') {
+            // Genel Sohbete Gönder
+            socket.emit('send_message', messageData);
+            setChatMessages((prev) => [...prev, { ...messageData, type: 'global' }]);
+        } else {
+            // Özel Mesaja (DM) Gönder
+            socket.emit('send_dm', { ...messageData, targetUsername: currentChat });
+            // Kendi ekranımızda da görebilmek için listeye ekle
+            setChatMessages((prev) => [...prev, { ...messageData, type: 'dm', dmPartner: currentChat }]);
+        }
+        setCurrentMessage('');
     }
 
     const handleLogout = () => {
@@ -293,6 +295,13 @@ export default function ChatDashboard() {
     }
 
     if (loading) return <div className="flex h-screen bg-slate-950 items-center justify-center"><div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div></div>
+
+    // O an bulunduğumuz sekmeye (DM veya Global) göre mesajları filtrele
+    const displayedMessages = chatMessages.filter(msg => {
+        if (currentChat === 'global') return msg.type === 'global';
+        // DM ise: Gönderen ya ben olmalıyım (partner hedeftir) ya da gönderen hedef olmalıdır
+        return msg.type === 'dm' && (msg.dmPartner === currentChat || msg.sender === currentChat);
+    });
 
     return (
         <div className={`flex flex-col h-[100dvh] transition-colors duration-300 ${themeBg}`}>
@@ -355,24 +364,46 @@ export default function ChatDashboard() {
                 <div className="flex-1 flex flex-col relative overflow-hidden">
                     {activeTab === 'chat' ? (
                         <>
-                            <div className={`hidden md:flex h-16 border-b items-center px-6 absolute top-0 w-full z-10 ${cardBg}`}>
-                                <h3 className="font-bold text-lg tracking-wide">Yazılı Sohbet</h3>
+                            {/* YENİ: AKTİF KULLANICILAR VE DM ÇUBUĞU */}
+                            <div className={`h-20 border-b flex items-center px-4 absolute top-0 w-full z-10 overflow-x-auto whitespace-nowrap gap-3 ${cardBg} custom-scrollbar`}>
+                                {/* Genel Sohbet Butonu */}
+                                <div onClick={() => setCurrentChat('global')} className={`flex flex-col items-center justify-center cursor-pointer min-w-[70px] p-2 rounded-xl transition-all ${currentChat === 'global' ? 'bg-indigo-500/10 border border-indigo-500/30' : 'hover:bg-slate-500/10 border border-transparent'}`}>
+                                    <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center text-xl shadow-sm mb-1">🌐</div>
+                                    <span className={`text-[10px] font-bold ${currentChat === 'global' ? 'text-indigo-500' : textMuted}`}>Genel</span>
+                                </div>
+
+                                {/* Aktif Kullanıcılar (DM) */}
+                                {activeUsers.map((u, i) => (
+                                    <div key={i} onClick={() => setCurrentChat(u.username)} className={`flex flex-col items-center justify-center cursor-pointer min-w-[70px] p-2 rounded-xl transition-all ${currentChat === u.username ? 'bg-indigo-500/10 border border-indigo-500/30' : 'hover:bg-slate-500/10 border border-transparent'}`}>
+                                        <div className="relative">
+                                            <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-emerald-400 to-teal-500 flex items-center justify-center text-white font-bold shadow-sm mb-1">
+                                                {u.username.charAt(0).toUpperCase()}
+                                            </div>
+                                            <div className="absolute bottom-1 right-0 w-3 h-3 bg-green-500 border-2 border-white rounded-full"></div>
+                                        </div>
+                                        <span className={`text-[10px] font-bold truncate max-w-[60px] ${currentChat === u.username ? 'text-indigo-500' : textMuted}`}>{u.username}</span>
+                                    </div>
+                                ))}
                             </div>
 
                             {/* MESAJ LİSTESİ */}
-                            <div className="flex-1 overflow-y-auto p-4 md:p-6 md:pt-24 space-y-4 pb-24 md:pb-6">
-                                {chatMessages.length === 0 ? (
-                                    <div className="h-full flex flex-col items-center justify-center opacity-50">
-                                        <span className="text-6xl mb-4">👋</span>
-                                        <p className={textMuted}>Sohbeti başlatmak için bir şeyler yazın.</p>
+                            <div className="flex-1 overflow-y-auto p-4 md:p-6 pt-24 md:pt-28 space-y-4 pb-24 md:pb-6">
+                                {displayedMessages.length === 0 ? (
+                                    <div className="h-full flex flex-col items-center justify-center opacity-50 mt-10">
+                                        <span className="text-6xl mb-4">{currentChat === 'global' ? '🌍' : '🔒'}</span>
+                                        <p className={textMuted}>
+                                            {currentChat === 'global'
+                                                ? "Genel sohbete hoş geldin. Bir şeyler yaz..."
+                                                : `${currentChat} ile olan gizli sohbetin.`}
+                                        </p>
                                     </div>
                                 ) : (
-                                    chatMessages.map((msg, index) => {
+                                    displayedMessages.map((msg, index) => {
                                         const isMe = msg.sender === profile?.kullanici_adi;
                                         return (
                                             <div key={index} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
                                                 <span className={`text-[10px] mb-1 px-1 ${textMuted}`}>{msg.sender} • {msg.time}</span>
-                                                <div className={`px-4 py-2.5 rounded-2xl max-w-[85%] md:max-w-[70%] text-sm md:text-base ${isMe ? 'bg-indigo-600 text-white rounded-br-sm' : `${bubbleOther} rounded-bl-sm border`}`}>
+                                                <div className={`px-4 py-2.5 rounded-2xl max-w-[85%] md:max-w-[70%] text-sm md:text-base shadow-sm ${isMe ? 'bg-indigo-600 text-white rounded-br-sm' : `${bubbleOther} rounded-bl-sm border`}`}>
                                                     {msg.text}
                                                 </div>
                                             </div>
@@ -386,7 +417,7 @@ export default function ChatDashboard() {
                                 <form onSubmit={sendMessage} className="flex space-x-2 max-w-4xl mx-auto">
                                     <input
                                         type="text"
-                                        placeholder="Bir mesaj yazın..."
+                                        placeholder={currentChat === 'global' ? "Genel sohbete yaz..." : `${currentChat} kişisine DM gönder...`}
                                         value={currentMessage}
                                         onChange={(e) => setCurrentMessage(e.target.value)}
                                         className={`flex-1 border px-5 py-3.5 rounded-full focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all text-sm md:text-base ${inputBg}`}
@@ -400,7 +431,6 @@ export default function ChatDashboard() {
                     ) : (
                         <div className="flex-1 flex flex-col p-4 md:p-8 relative overflow-y-auto mb-[70px] md:mb-0">
 
-                            {/* EKRAN PAYLAŞIMI ALANI */}
                             <div id="video-grid" className="w-full flex flex-wrap justify-center gap-4 mb-6 empty:hidden z-10"></div>
 
                             <div className="z-10 w-full max-w-2xl mx-auto flex flex-col items-center mt-auto mb-auto">
@@ -436,7 +466,6 @@ export default function ChatDashboard() {
                                                 </div>
                                             </div>
 
-                                            {/* YENİ: KULLANICILAR VE SES ÇUBUKLARI */}
                                             {voiceUsers.map((user, index) => (
                                                 <div key={index} className={`flex items-center justify-between border p-3 rounded-2xl mt-2 ${isDarkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
                                                     <div className="flex items-center space-x-3 truncate">
@@ -446,7 +475,6 @@ export default function ChatDashboard() {
                                                         <span className="font-medium truncate">{user.username || "Misafir"}</span>
                                                     </div>
 
-                                                    {/* Ses Ayar Çubuğu (Slider) */}
                                                     <div className="flex items-center space-x-2 flex-shrink-0">
                                                         <span className="text-xs">🔊</span>
                                                         <input
@@ -500,6 +528,19 @@ export default function ChatDashboard() {
                 </button>
             </div>
 
+            {/* SCROLLBAR İÇİN ÖZEL CSS */}
+            <style jsx global>{`
+                .custom-scrollbar::-webkit-scrollbar {
+                    height: 4px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-track {
+                    background: transparent;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb {
+                    background-color: #6366f1;
+                    border-radius: 20px;
+                }
+            `}</style>
         </div>
     )
 }
